@@ -18,16 +18,14 @@ fn main() {
 
     let mut seed = 0;
     for (idx, player) in players.iter().enumerate() {
-        let (random_number, random_string) = player.reveal();
-        let random_number = random_number.unwrap();
-        let random_string = random_string.unwrap();
+        let (num, str) = player.reveal();
 
-        let hash = hash_blake2(random_number, random_string);
+        let hash = hash_blake2(num, str);
         if commitals[idx] != hash {
             panic!("cheated player!!!");
         }
 
-        seed += random_number;
+        seed += num;
     }
 
     for _ in 0..5 {
@@ -41,16 +39,21 @@ fn main() {
     let mut winner = 0;
     let context = signing_context("".as_bytes());
     for (player_idx, player) in players.iter().enumerate() {
-        let (max_value, (vrf_in_out, vrf_proof)) = player.show_highest_card();
-        let idx = player.index.unwrap();
+        let max_draw = player.show_highest_card();
+        let (vrf_in_out, vrf_proof) = max_draw.proof;
         let res = player.keypair.public.vrf_verify(
-            context.bytes(&idx.to_le_bytes()),
+            context.bytes(&max_draw.index.to_le_bytes()),
             &VRFPreOut::from_bytes(&vrf_in_out.output.to_bytes()).unwrap(),
             &vrf_proof,
         );
-        if res.is_ok() && winner_value < max_value {
-            winner_value = max_value;
-            winner = player_idx;
+        if res.is_ok() {
+            println!("Player {player_idx} has max value {}", max_draw.value);
+            if winner_value < max_draw.value {
+                winner_value = max_draw.value;
+                winner = player_idx;
+            }
+        } else {
+            println!("Player {player_idx} tried to cheat, it's disqualified!")
         }
     }
 
@@ -61,24 +64,25 @@ fn hash_blake2(random_number: u32, random_string: String) -> [u8; 16] {
     sp_core::blake2_128(&format!("{random_number}{random_string}").into_bytes())
 }
 
+#[derive(Clone, Debug)]
+struct MaxDraw {
+    index: u32,
+    value: u8,
+    proof: (VRFInOut, VRFProof),
+}
+
 struct Player {
     keypair: Keypair,
-    random_number: Option<u32>,
-    random_string: Option<String>,
-    max_value: Option<u8>,
-    index: Option<u32>,
-    proof: Option<(VRFInOut, VRFProof)>,
+    commitment: Option<(u32, String)>,
+    max_draw: Option<MaxDraw>,
 }
 
 impl Player {
     fn new() -> Self {
         Self {
             keypair: Keypair::generate(),
-            random_number: None,
-            random_string: None,
-            max_value: None,
-            index: None,
-            proof: None,
+            commitment: None,
+            max_draw: None,
         }
     }
 
@@ -91,33 +95,30 @@ impl Player {
             .collect();
 
         let hash = hash_blake2(random_number, random_string.clone());
-        self.random_number = Some(random_number);
-        self.random_string = Some(random_string);
+        self.commitment = Some((random_number, random_string));
         hash
     }
 
-    fn reveal(&self) -> (Option<u32>, Option<String>) {
-        (self.random_number, self.random_string.clone())
+    fn reveal(&self) -> (u32, String) {
+        self.commitment.clone().unwrap()
     }
 
     fn draw(&mut self, idx: u32) {
         let context = signing_context("".as_bytes());
         let (vrf_in_out, vrf_proof, _) = self.keypair.vrf_sign(context.bytes(&idx.to_le_bytes()));
         let card = vrf_in_out.as_output_bytes()[0] % 52;
-        if let Some(max_value) = self.max_value {
-            if max_value < card {
-                self.max_value = Some(card);
-                self.proof = Some((vrf_in_out, vrf_proof));
-                self.index = Some(idx);
-            }
-        } else {
-            self.max_value = Some(card);
-            self.proof = Some((vrf_in_out, vrf_proof));
-            self.index = Some(idx);
-        }
+
+        self.max_draw = Some(match &self.max_draw {
+            Some(max_draw) if max_draw.value > card => max_draw.clone(),
+            _ => MaxDraw {
+                index: idx,
+                proof: (vrf_in_out, vrf_proof),
+                value: card,
+            },
+        })
     }
 
-    fn show_highest_card(&self) -> (u8, (VRFInOut, VRFProof)) {
-        (self.max_value.unwrap(), self.proof.clone().unwrap())
+    fn show_highest_card(&self) -> MaxDraw {
+        self.max_draw.clone().unwrap()
     }
 }
